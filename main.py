@@ -7,35 +7,46 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import surf2stl
 
+class LCMSacquisition:
+    def __init__(self, file_path):
+        scanTimes = []
+        spectrumFrames = []
+        with mzxml.read(file_path) as reader:
+            for spectrum in reader:
+                scanTimes += [spectrum['retentionTime']]
+                spectrumFrames += [pd.DataFrame(list(zip(spectrum['m/z array'], spectrum['intensity array'])), columns = ["mz", "intensity"])]
+        scanTimes = np.array(scanTimes) * 60
+        spectrumFrames = np.array(spectrumFrames, dtype=object)
+        self.times = scanTimes
+        self.spectra = spectrumFrames
+    
+    def roundTimes(self, sigFig=2):
+        for time in range(0, len(self.times)):
+            self.times[time] = round(10**sigFig * self.times[time]) / 10**sigFig
+
 def getScan():
     file_path = filedialog.askopenfilename()
-    scanTimes = []
-    with mzxml.read(file_path) as reader:
-        for 
+    newAcquisition = LCMSacquisition(file_path)
+    return newAcquisition
+
+def getSubset(analysis, mzWindow, timeWindow):
+    subsetTimes = analysis.times[np.where((analysis.times > timeWindow[0]) & (analysis.times < timeWindow[1]))]
+    subsetSpectra = analysis.spectra[np.where((analysis.times > timeWindow[0]) & (analysis.times < timeWindow[1]))]
+    slicedSpectra = []
+    for spectrum in subsetSpectra:
+        slicedSpectra += [spectrum[(spectrum.loc[:,'mz'] > mzWindow[0]) & (spectrum.loc[:,'mz'] < mzWindow[1])].reset_index(drop=True)]
+    return subsetTimes, slicedSpectra
+    
+
+###Inputs
+mzWindow = [100, 101]
+timeWindow = [50, 51]
 
 
-scanTimes = []
-with mzxml.read('VT_230428_rsvcd1_testis_007.mzXML') as reader:
-    for spectrum in reader:
-        scanTimes += [spectrum['retentionTime']]
+qstd = getScan()
+subsetTimes, subsetSpectra = getSubset(qstd,  mzWindow, timeWindow)
 
-for time in range(0, len(scanTimes)):
-    scanTimes[time] = scanTimes[time] * 60
 
-spectrumFrames = []
-with mzxml.read('VT_230428_rsvcd1_testis_007.mzXML') as reader:
-    for spectrum in reader:
-        spectrumFrames += [pd.DataFrame(list(zip(spectrum['m/z array'], spectrum['intensity array'])), columns = ["mz", "intensity"])]
-
-subsetTimes = scanTimes[387:397]
-subsetFrames = spectrumFrames[387:397]
-
-for time in range(0, len(subsetTimes)):
-    subsetTimes[time] = round(100 * subsetTimes[time]) / 100
-
-smallFrames = []
-for spectrum in subsetFrames:
-    smallFrames += [spectrum[(spectrum.loc[:,'mz'] < 147.5) & (spectrum.loc[:, 'mz'] > 146.5)]]
 
 maxIntensity = 0
 for spectrum in smallFrames:
