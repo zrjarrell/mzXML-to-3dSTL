@@ -1,33 +1,46 @@
 
-from tkinter import filedialog
 from pyteomics import mzxml
+import math
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d import Axes3D, axes3d
 import surf2stl
 
 class LCMSacquisition:
     def __init__(self, file_path):
         scanTimes = []
         spectrumFrames = []
+        numSpectra = 0
         with mzxml.read(file_path) as reader:
             for spectrum in reader:
+                if int(spectrum['id']) > numSpectra:
+                    numSpectra = int(spectrum['id'])
+        with mzxml.read(file_path) as reader:
+            c = 1
+            for spectrum in reader:
+                print("Building spectra %d of %d." % (c, numSpectra), end="\r")
                 scanTimes += [spectrum['retentionTime']]
                 spectrumFrames += [pd.DataFrame(list(zip(spectrum['m/z array'], spectrum['intensity array'])), columns = ["mz", "intensity"])]
+                c += 1
         scanTimes = np.array(scanTimes) * 60
         spectrumFrames = np.array(spectrumFrames, dtype=object)
         self.times = scanTimes
         self.spectra = spectrumFrames
     
-    def roundTimes(self, sigFig=2):
+    def roundTimes(self, sigFig=3):
         for time in range(0, len(self.times)):
-            self.times[time] = round(10**sigFig * self.times[time]) / 10**sigFig
+            self.times[time] = properRound(self.times[time], sigFig)
 
-def getScan():
-    file_path = filedialog.askopenfilename()
-    newAcquisition = LCMSacquisition(file_path)
-    return newAcquisition
+def properRound(n, decimals=0):
+    expoN = n * 10 ** decimals
+    if abs(expoN) - abs(math.floor(expoN)) < 0.5:
+        result =  math.floor(expoN) / 10 ** decimals
+    else:
+        result = math.ceil(expoN) / 10 ** decimals
+    if decimals <= 0:
+        return int(result)
+    return result
 
 def getSubset(analysis, mzWindow, timeWindow):
     subsetTimes = analysis.times[np.where((analysis.times > timeWindow[0]) & (analysis.times < timeWindow[1]))]
@@ -36,190 +49,100 @@ def getSubset(analysis, mzWindow, timeWindow):
     for spectrum in subsetSpectra:
         slicedSpectra += [spectrum[(spectrum.loc[:,'mz'] > mzWindow[0]) & (spectrum.loc[:,'mz'] < mzWindow[1])].reset_index(drop=True)]
     return subsetTimes, slicedSpectra
-    
+
+def transformIntensity(subsetSpectra, method):
+    if method == 'squareroot':
+        for spectrum in subsetSpectra:
+            transformed = np.sqrt(spectrum['intensity'])
+            spectrum['intensity'] = transformed
+    elif method == 'cuberoot':
+        for spectrum in subsetSpectra:
+            transformed = np.cbrt(spectrum['intensity'])
+            spectrum['intensity'] = transformed
+    elif method == 'log2':
+        for spectrum in subsetSpectra:
+            transformed = np.log2(spectrum['intensity'])
+            spectrum['intensity'] = transformed
+    elif method == 'log10':
+        for spectrum in subsetSpectra:
+            transformed = np.log10(spectrum['intensity'])
+            spectrum['intensity'] = transformed
+    else:
+        print("Please provide a valid method: 'squareroot', 'cuberoot', 'log2', 'log10', or 'none'")
+
+def getRelIntensity(subsetSpectra, relThreshold):
+    maxIntensity = 0
+    for spectrum in subsetSpectra:
+        if max(spectrum.loc[:, 'intensity']) > maxIntensity:
+            maxIntensity = max(spectrum.loc[:, 'intensity'])
+    for spectrum in subsetSpectra:
+        spectrum['relIntensity'] = spectrum['intensity'] / maxIntensity
+        spectrum['relIntensity'][spectrum.loc[:,'relIntensity'] < relThreshold] = relThreshold
+    return maxIntensity
+
+def binMasses(subsetSpectra, numBins, mzWindow, relThreshold):
+    binnedFrames = []
+    bins = []
+    stepSize = (mzWindow[1] - mzWindow[0]) / numBins
+    for i in range(0, numBins):
+        bins += [mzWindow[0] + stepSize * i, mzWindow[0] + stepSize * (i + 1) - stepSize / 1000]
+    c = 1
+    for spectrum in subsetSpectra:
+        print("Binning spectrum %d of %d." % (c, len(subsetSpectra)), end = "\r")
+        binnedIntensity = []
+        for i in range(0, numBins):
+            subset = spectrum[(spectrum['mz'] > bins[2*i]) & (spectrum['mz'] < bins[2*i+1])]
+            if len(subset) > 0:
+                binnedIntensity += [max(subset['relIntensity']), max(subset['relIntensity'])]
+            else:
+                binnedIntensity += [relThreshold, relThreshold]
+        binnedData = pd.DataFrame(list(zip(bins, binnedIntensity)), columns = ["mz", "intensity"])
+        binnedFrames += [binnedData]
+        c += 1
+    return binnedFrames
+
+def plotSpectra(binnedFrames):
+    x = np.array(binnedFrames[0]['mz'])
+    y = np.array([subsetTimes[0]])
+    Z = np.array([binnedFrames[0]['intensity'].to_list()])
+    for i in range(1, len(binnedFrames)):
+        Z = np.append(Z, [binnedFrames[i]['intensity'].to_list()], axis = 0)
+        y = np.append(y, [subsetTimes[i]], axis = 0)
+    X, Y = np.meshgrid(x, y)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_surface(X, Y, Z, cmap=plt.cm.YlGnBu_r)
+    plt.show()
 
 ###Inputs
-mzWindow = [100, 101]
-timeWindow = [50, 51]
+file_path = "/Users/zrj/Documents/research/scripts/qstd.mzXML"
+mzWindow = [100, 200]
+timeWindow = [50, 60]
+relThreshold = 0.001
+numBins = 2000
+transformMethod = 'squareroot'
 
+qstd = LCMSacquisition(file_path)
 
-qstd = getScan()
+qstd.roundTimes()
 subsetTimes, subsetSpectra = getSubset(qstd,  mzWindow, timeWindow)
+if transformMethod != 'none':
+    transformIntensity(subsetSpectra, transformMethod)
 
+maxIntensity = getRelIntensity(subsetSpectra, relThreshold)
+binnedFrames = binMasses(subsetSpectra, numBins, mzWindow, relThreshold)
 
+plotSpectra(binnedFrames)
 
-maxIntensity = 0
-for spectrum in smallFrames:
-    if max(spectrum.loc[:, 'intensity']) > maxIntensity:
-        maxIntensity = max(spectrum.loc[:, 'intensity'])
-
-printFrames = []
-for spectrum in smallFrames:
-    spectrum['relIntensity'] = spectrum['intensity'] / maxIntensity
-    printFrames += [spectrum[spectrum['relIntensity'] > 0.0025]]
-
-histoFrames = []
-startBins = []
-endBins = []
-for i in range(0, 100):
-    startBins += [146.5 + 0.01 * i]
-    endBins += [146.5 + 0.01 * (i + 1) - 0.001]
-
-for spectrum in printFrames:
-    startIntensity = []
-    endIntensity = []
-    for i in range(0, 100):
-        subset = spectrum[(spectrum['mz'] > startBins[i]) & (spectrum['mz'] < endBins[i])]
-        if len(subset) > 0:
-            startIntensity += [max(subset['relIntensity'])]
-            endIntensity += [max(subset['relIntensity'])]
-        else:
-            startIntensity += [0.0025]
-            endIntensity += [0.0025]
-    startData = pd.DataFrame(list(zip(startBins, startIntensity)), columns = ["mz", "relIntensity"])
-    endData = pd.DataFrame(list(zip(endBins, endIntensity)), columns = ["mz", "relIntensity"])
-    histoFrames += [startData.append(endData).sort_values('mz', axis = 0).reset_index(drop = True)]
-
-
-# testFrame = histoFrames[0]
-# x = np.array(testFrame['mz'])
-# y = np.linspace(0, 0.15, 2)
-# X, Y = np.meshgrid(x, y)
-# Z = np.array([testFrame['relIntensity'].to_list()] * 2)
-
-# fig = plt.figure()
-# ax = fig.add_subplot(111, projection='3d')
-
-# ax.plot_surface(X, Y, Z, cmap=plt.cm.YlGnBu_r)
-
-# plt.show()
-
-# surf2stl.write('3d-1amu-2sec.stl', X, Y, Z)
-
-
-
-
-
-# deltas = []
-# for spectrum in printFrames:
-#     masses = spectrum['mz'].to_list()
-#     for mass in range(1, len(masses)):
-#         deltas += [masses[mass]-masses[mass-1]]
-
-
-
-
-
-x = np.array(histoFrames[0]['mz'])
-
-Z = np.array([[0.0025]*200, [0.0025]*200, histoFrames[0]['relIntensity'].to_list(), histoFrames[0]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[1]['relIntensity'].to_list(), histoFrames[1]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[2]['relIntensity'].to_list(), histoFrames[2]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[3]['relIntensity'].to_list(), histoFrames[3]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[4]['relIntensity'].to_list(), histoFrames[4]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[5]['relIntensity'].to_list(), histoFrames[5]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[6]['relIntensity'].to_list(), histoFrames[6]['relIntensity'].to_list(), [0.0025]*200,
-              [0.0025]*200, histoFrames[7]['relIntensity'].to_list(), histoFrames[7]['relIntensity'].to_list(), [0.0025]*200, [0.0025]*200])
-
-y = np.array([round(subsetTimes[0]), subsetTimes[0] - 0.01, subsetTimes[0], subsetTimes[0] + 0.05, subsetTimes[0] + 0.06,
-              subsetTimes[1] - 0.01, subsetTimes[1], subsetTimes[1] + 0.05, subsetTimes[1] + 0.06,
-              subsetTimes[2] - 0.01, subsetTimes[2], subsetTimes[2] + 0.05, subsetTimes[2] + 0.06,
-              subsetTimes[3] - 0.01, subsetTimes[3], subsetTimes[3] + 0.05, subsetTimes[3] + 0.06,
-              subsetTimes[4] - 0.01, subsetTimes[4], subsetTimes[4] + 0.05, subsetTimes[4] + 0.06,
-              subsetTimes[5] - 0.01, subsetTimes[5], subsetTimes[5] + 0.05, subsetTimes[5] + 0.06,
-              subsetTimes[6] - 0.01, subsetTimes[6], subsetTimes[6] + 0.05, subsetTimes[6] + 0.06,
-              subsetTimes[7] - 0.01, subsetTimes[7], subsetTimes[7] + 0.05, subsetTimes[7] + 0.06, round(subsetTimes[7])])
-y = y / 2
-#y = np.linspace(0, 1, len(Z))
-X, Y = np.meshgrid(x, y)
-
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
-
-ax.plot_surface(X, Y, Z, cmap=plt.cm.YlGnBu_r)
-
-plt.show()
-
-
-
-
-
-#whole map view
-x = np.array(histoFrames[0]['mz'])
-
-Z = np.array([[0.0025]*200, [0.0025]*200])
-for i in histoFrames:
-    Z = np.append(Z, [i['relIntensity']], axis=0)
-
-y = np.linspace(0, 300, len(scanTimes)+2)
-#y = np.linspace(0, 1, len(Z))
-X, Y = np.meshgrid(x, y)
-
-fig = plt.figure()
-ax = fig.add_subplot(111, projection='3d')
-
-ax.plot_surface(X, Y, Z, cmap=plt.cm.YlGnBu_r)
-
-plt.show()
+surf2stl.write('3d-10amu-10s.stl', X, Y, Z)
 
 
 
 
 
 
-
-
-
-
-
-
-
-
-subsetTimes = scanTimes[387:397]
-subsetFrames = spectrumFrames[387:397]
-
-for time in range(0, len(subsetTimes)):
-    subsetTimes[time] = round(100 * subsetTimes[time]) / 100
-
-smallFrames = []
-for spectrum in subsetFrames:
-    smallFrames += [spectrum[(spectrum.loc[:,'mz'] < 147.12) & (spectrum.loc[:, 'mz'] > 147.11)]]
-
-maxIntensity = 0
-for spectrum in smallFrames:
-    if max(spectrum.loc[:, 'intensity']) > maxIntensity:
-        maxIntensity = max(spectrum.loc[:, 'intensity'])
-
-printFrames = []
-for spectrum in smallFrames:
-    spectrum['relIntensity'] = spectrum['intensity'] / maxIntensity
-    printFrames += [spectrum[spectrum['relIntensity'] > 0.0025]]
-
-histoFrames = []
-startBins = []
-endBins = []
-for i in range(0, 100):
-    startBins += [147.11 + 0.0001 * i]
-    endBins += [147.11 + 0.0001 * (i + 1) - 0.00001]
-
-for spectrum in printFrames:
-    startIntensity = []
-    endIntensity = []
-    for i in range(0, 100):
-        subset = spectrum[(spectrum['mz'] > startBins[i]) & (spectrum['mz'] < endBins[i])]
-        if len(subset) > 0:
-            startIntensity += [max(subset['relIntensity'])]
-            endIntensity += [max(subset['relIntensity'])]
-        else:
-            startIntensity += [0.0025]
-            endIntensity += [0.0025]
-    startData = pd.DataFrame(list(zip(startBins, startIntensity)), columns = ["mz", "relIntensity"])
-    endData = pd.DataFrame(list(zip(endBins, endIntensity)), columns = ["mz", "relIntensity"])
-    histoFrames += [startData.append(endData).sort_values('mz', axis = 0).reset_index(drop = True)]
-
-
-
-x = np.array(histoFrames[0]['mz'])
+#old notes on generating one frame
+""" x = np.array(histoFrames[0]['mz'])
 
 x = x * 100
 
@@ -239,4 +162,4 @@ ax.plot_surface(X, Y, Z, cmap=plt.cm.YlGnBu_r)
 plt.show()
 
 
-surf2stl.write('3d-1hundredth-amu-zoomed.stl', X, Y, Z)
+surf2stl.write('3d-1hundredth-amu-zoomed.stl', X, Y, Z) """
